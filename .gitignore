@@ -1,0 +1,64 @@
+# ==============================
+# Environment & Secrets
+# ==============================
+.env
+.env.*
+!.env.example
+
+# ==============================
+# Python
+# ==============================
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ==============================
+# Testing / Coverage
+# ==============================
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.coverage.*
+
+# ==============================
+# Local Application Data
+# ==============================
+data/docsight.db
+data/uploads/
+data/extracted/
+data/processed/
+data/images/
+
+# ==============================
+# ChromaDB / Vector Store
+# ==============================
+vectorstore/
+
+# ==============================
+# Frontend
+# ==============================
+frontend/node_modules/
+frontend/dist/
+
+# ==============================
+# Build / Packaging
+# ==============================
+*.egg-info/
+build/
+dist/
+
+# ==============================
+# IDE / Editor
+# ==============================
+.vscode/
+.idea/
+
+# ==============================
+# OS Files
+# ==============================
+.DS_Store
+Thumbs.db
