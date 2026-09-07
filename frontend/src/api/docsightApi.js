@@ -59,6 +59,29 @@ export const uploadDocument = async (
 
 
 // ======================================================
+// DOCUMENT DELETE
+// ======================================================
+
+export const deleteDocument = async (
+  documentId
+) => {
+  if (!documentId) {
+    throw new Error(
+      "Document ID is required."
+    );
+  }
+
+  const response = await api.delete(
+    `/documents/${encodeURIComponent(
+      documentId
+    )}`
+  );
+
+  return response.data;
+};
+
+
+// ======================================================
 // DOCUMENT PDF URL
 // ======================================================
 

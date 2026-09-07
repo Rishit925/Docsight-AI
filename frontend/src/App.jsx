@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   checkHealth,
   getDocuments,
+  deleteDocument,
   uploadDocument,
   askQuestion as askQuestionApi,
   getConversation,
@@ -50,6 +51,7 @@ function App() {
   const [loadingHistory, setLoadingHistory] = useState(false);
 
   const [processing, setProcessing] = useState(false);
+  const [deletingDocumentId, setDeletingDocumentId] = useState(null);
 
   // ==================================================
   // CHAT STATE
@@ -360,6 +362,56 @@ function App() {
     await loadConversation(
       historicalDocument.document_id
     );
+  };
+
+
+
+  // ==================================================
+  // DELETE DOCUMENT
+  // ==================================================
+
+  const handleDeleteDocument = async (documentToDelete) => {
+    const documentId = documentToDelete?.document_id;
+
+    if (!documentId) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete "${documentToDelete.file_name}"? This will permanently remove the document and its stored data.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingDocumentId(documentId);
+    setError("");
+
+    try {
+      await deleteDocument(documentId);
+
+      if (document?.document_id === documentId) {
+        setDocument(null);
+        setConversation([]);
+        setQuestion("");
+      }
+
+      await loadDocumentHistory();
+    } catch (err) {
+      console.error(
+        "Document deletion failed:",
+        err
+      );
+
+      const message =
+        err.response?.data?.detail ||
+        "Failed to delete the document. Please try again.";
+
+      setError(message);
+    } finally {
+      setDeletingDocumentId(null);
+    }
   };
 
 
@@ -972,6 +1024,36 @@ function App() {
                 </div>
 
               </div>
+
+
+              <button
+                className="secondary-button"
+                onClick={() =>
+                  handleDeleteDocument(document)
+                }
+                disabled={
+                  processing ||
+                  asking ||
+                  deletingDocumentId ===
+                    document.document_id
+                }
+              >
+                {deletingDocumentId ===
+                document.document_id ? (
+                  <>
+                    <Loader2
+                      size={16}
+                      className="spin"
+                    />
+                    Deleting...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={16} />
+                    Delete document
+                  </>
+                )}
+              </button>
 
             </section>
           </>

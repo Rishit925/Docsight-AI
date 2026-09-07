@@ -14,6 +14,10 @@ from app.vectorstore.chroma_store import ChromaStore
 
 from app.database.document_store import DocumentStore
 
+from app.storage.supabase_storage import (
+    SupabaseStorage,
+)
+
 
 class DocumentService:
     """
@@ -25,13 +29,15 @@ class DocumentService:
           ↓
         DocumentProcessor
           ↓
+        Supabase Storage for extracted images
+          ↓
         Chunks
           ↓
         Embeddings
           ↓
-        ChromaDB
+        ChromaDB / Qdrant
           ↓
-        SQLite document metadata
+        PostgreSQL / SQLite document metadata
     """
 
     def __init__(
@@ -41,6 +47,7 @@ class DocumentService:
         embedding_service=None,
         vector_store=None,
         document_store=None,
+        storage=None,
     ):
         self.processor = (
             processor
@@ -67,6 +74,11 @@ class DocumentService:
             or DocumentStore()
         )
 
+        self.storage = (
+            storage
+            or SupabaseStorage()
+        )
+
     # ==================================================
     # PROCESS DOCUMENT
     # ==================================================
@@ -82,7 +94,7 @@ class DocumentService:
 
         Args:
             file_path:
-                Internal path to the uploaded PDF.
+                Internal temporary path to the uploaded PDF.
 
             document_id:
                 Unique ID assigned by the API.
@@ -143,9 +155,9 @@ class DocumentService:
         # --------------------------------------------------
         # 3. Preserve original filename
         #
-        # DocumentProcessor sees the UUID-based physical
-        # filename, so explicitly replace it with the
-        # original user-facing filename.
+        # DocumentProcessor sees the physical filename,
+        # so explicitly replace it with the user-facing
+        # filename.
         # --------------------------------------------------
 
         processed_document[
@@ -153,7 +165,24 @@ class DocumentService:
         ] = display_filename
 
         # --------------------------------------------------
-        # 4. Create chunks
+        # 4. Persist extracted images
+        #
+        # Images are processed locally first because
+        # ImageProcessor/OpenAIProvider require filesystem
+        # paths.
+        #
+        # After OpenAI analysis is complete, the images are
+        # uploaded to Supabase Storage and the permanent
+        # storage path replaces the temporary local path.
+        # --------------------------------------------------
+
+        self._persist_image_storage(
+            processed_document=processed_document,
+            document_id=document_id,
+        )
+
+        # --------------------------------------------------
+        # 5. Create chunks
         # --------------------------------------------------
 
         chunks = self._create_chunks(
@@ -162,7 +191,7 @@ class DocumentService:
         )
 
         # --------------------------------------------------
-        # 5. Handle empty documents
+        # 6. Handle empty documents
         # --------------------------------------------------
 
         if not chunks:
@@ -180,7 +209,7 @@ class DocumentService:
             }
 
         # --------------------------------------------------
-        # 6. Generate embeddings
+        # 7. Generate embeddings
         # --------------------------------------------------
 
         texts = []
@@ -206,7 +235,7 @@ class DocumentService:
         )
 
         # --------------------------------------------------
-        # 7. Store in ChromaDB
+        # 8. Store in ChromaDB / Qdrant
         # --------------------------------------------------
 
         self.vector_store.add_chunks(
@@ -215,7 +244,7 @@ class DocumentService:
         )
 
         # --------------------------------------------------
-        # 8. Statistics
+        # 9. Statistics
         # --------------------------------------------------
 
         statistics = (
@@ -225,7 +254,7 @@ class DocumentService:
         )
 
         # --------------------------------------------------
-        # 9. Store document metadata in SQLite
+        # 10. Store document metadata
         # --------------------------------------------------
 
         self.document_store.add_document(
@@ -248,7 +277,7 @@ class DocumentService:
         )
 
         # --------------------------------------------------
-        # 10. Return API response
+        # 11. Return API response
         # --------------------------------------------------
 
         return {
@@ -271,6 +300,138 @@ class DocumentService:
                 "image_chunks"
             ],
         }
+
+    # ==================================================
+    # PERSIST IMAGE STORAGE
+    # ==================================================
+
+    def _persist_image_storage(
+        self,
+        processed_document,
+        document_id,
+    ):
+        """
+        Upload extracted images to Supabase Storage.
+
+        The local image path is retained temporarily
+        for OpenAI processing, then replaced with the
+        permanent Supabase Storage object path.
+
+        This method does not change image descriptions.
+        """
+
+        pages = processed_document.get(
+            "pages",
+            [],
+        )
+
+        for page in pages:
+
+            images = page.get(
+                "images",
+                [],
+            )
+
+            for image in images:
+
+                local_path = image.get(
+                    "path"
+                )
+
+                if not local_path:
+                    continue
+
+                local_path = Path(
+                    local_path
+                )
+
+                if not local_path.exists():
+                    raise FileNotFoundError(
+                        f"Extracted image not found: "
+                        f"{local_path}"
+                    )
+
+                storage_path = (
+                    self._get_image_storage_path(
+                        document_id=document_id,
+                        image_path=local_path,
+                    )
+                )
+
+                content_type = (
+                    self._get_image_content_type(
+                        local_path
+                    )
+                )
+
+                self.storage.upload_file(
+                    local_path=local_path,
+                    storage_path=storage_path,
+                    content_type=content_type,
+                )
+
+                # --------------------------------------------------
+                # Replace temporary filesystem path with the
+                # persistent Supabase Storage object path.
+                # --------------------------------------------------
+
+                image[
+                    "storage_path"
+                ] = storage_path
+
+                image[
+                    "path"
+                ] = storage_path
+
+    # ==================================================
+    # IMAGE STORAGE PATH
+    # ==================================================
+
+    def _get_image_storage_path(
+        self,
+        document_id,
+        image_path,
+    ):
+        """
+        Create a stable Supabase Storage path for
+        an extracted image.
+        """
+
+        return (
+            f"{document_id}/"
+            f"images/"
+            f"{image_path.name}"
+        )
+
+    # ==================================================
+    # IMAGE CONTENT TYPE
+    # ==================================================
+
+    def _get_image_content_type(
+        self,
+        image_path,
+    ):
+        """
+        Determine the MIME type for an extracted image.
+        """
+
+        extension = (
+            image_path.suffix.lower()
+        )
+
+        content_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+            ".bmp": "image/bmp",
+        }
+
+        return content_types.get(
+            extension,
+            "application/octet-stream",
+        )
 
     # ==================================================
     # CREATE CHUNKS
@@ -347,7 +508,7 @@ class DocumentService:
                 ] = ""
 
             # ------------------------------------------
-            # Ensure content is Chroma-safe
+            # Ensure content is vector-store safe
             # ------------------------------------------
 
             if not isinstance(

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     File,
     HTTPException,
     UploadFile,
@@ -19,6 +20,9 @@ from app.api.services.document_service import (
     DocumentService,
 )
 from app.database.document_store import DocumentStore
+from app.storage.supabase_storage import (
+    SupabaseStorage,
+)
 
 
 router = APIRouter(
@@ -29,11 +33,13 @@ router = APIRouter(
 
 document_service = DocumentService()
 document_store = DocumentStore()
+storage = SupabaseStorage()
 
 
 UPLOAD_DIRECTORY = Path(
     "data/uploads"
 )
+
 
 UPLOAD_DIRECTORY.mkdir(
     parents=True,
@@ -63,9 +69,11 @@ def _safe_filename(filename: str) -> str:
     return filename
 
 
-def _get_unique_file_path(filename: str) -> Path:
+def _get_unique_file_path(
+    filename: str,
+) -> Path:
     """
-    Return a collision-safe physical file path.
+    Return a collision-safe temporary file path.
 
     Examples:
 
@@ -104,6 +112,78 @@ def _get_unique_file_path(filename: str) -> Path:
         counter += 1
 
 
+def _get_pdf_storage_path(
+    document_id: str,
+    stored_filename: str,
+) -> str:
+    """
+    Return the persistent Supabase Storage path
+    for an uploaded PDF.
+    """
+
+    return (
+        f"{document_id}/"
+        f"{stored_filename}"
+    )
+
+
+def _delete_cloud_document(
+    document_id: str,
+    stored_filename: str = None,
+):
+    """
+    Delete the PDF and extracted images belonging
+    to a document from Supabase Storage.
+    """
+
+    if stored_filename:
+
+        pdf_storage_path = (
+            _get_pdf_storage_path(
+                document_id=document_id,
+                stored_filename=stored_filename,
+            )
+        )
+
+        try:
+
+            storage.delete_file(
+                pdf_storage_path
+            )
+
+        except Exception:
+            pass
+
+    try:
+
+        storage.delete_folder(
+            f"{document_id}/images"
+        )
+
+    except Exception:
+        pass
+
+
+def _cleanup_temporary_file(
+    file_path: Path,
+):
+    """
+    Delete a temporary local file after it is no
+    longer needed.
+    """
+
+    if not file_path:
+        return
+
+    try:
+
+        if file_path.exists():
+            file_path.unlink()
+
+    except OSError:
+        pass
+
+
 # ======================================================
 # UPLOAD DOCUMENT
 # ======================================================
@@ -118,10 +198,11 @@ def upload_document(
     """
     Upload and index a PDF document.
 
-    The internal document_id remains a UUID.
+    The PDF and extracted images are persisted
+    in Supabase Storage.
 
-    The physical file uses a human-readable,
-    collision-safe filename.
+    The local filesystem is used only as temporary
+    processing storage.
     """
 
     # --------------------------------------------------
@@ -129,6 +210,7 @@ def upload_document(
     # --------------------------------------------------
 
     if not file.filename:
+
         raise HTTPException(
             status_code=400,
             detail="Filename is required.",
@@ -147,6 +229,7 @@ def upload_document(
     ).suffix.lower()
 
     if extension != ".pdf":
+
         raise HTTPException(
             status_code=400,
             detail="Only PDF files are supported.",
@@ -161,43 +244,31 @@ def upload_document(
     )
 
     # --------------------------------------------------
-    # Create collision-safe physical path
+    # Create temporary local path
     # --------------------------------------------------
 
     file_path = _get_unique_file_path(
         original_filename
     )
 
-    # IMPORTANT:
-    #
-    # Use the actual stored filename as the document's
-    # user-facing filename.
-    #
-    # This keeps:
-    #
-    #     SQLite
-    #     ChromaDB
-    #     Sources
-    #     Physical PDF
-    #
-    # synchronized.
-    #
-    # Example:
-    #
-    #     aiml.pdf
-    #     aiml (1).pdf
-    #
-    # If "aiml.pdf" already exists and the new upload
-    # becomes "aiml (1).pdf", the database will also
-    # contain "aiml (1).pdf".
-
     stored_filename = file_path.name
 
     # --------------------------------------------------
-    # Save uploaded file
+    # Persistent PDF storage path
     # --------------------------------------------------
 
+    pdf_storage_path = (
+        _get_pdf_storage_path(
+            document_id=document_id,
+            stored_filename=stored_filename,
+        )
+    )
+
     try:
+
+        # --------------------------------------------------
+        # Save uploaded PDF temporarily
+        # --------------------------------------------------
 
         with file_path.open(
             "wb"
@@ -209,7 +280,35 @@ def upload_document(
             )
 
         # --------------------------------------------------
+        # Persist original PDF
+        # --------------------------------------------------
+
+        storage.upload_file(
+            local_path=file_path,
+            storage_path=pdf_storage_path,
+            content_type="application/pdf",
+        )
+
+        # --------------------------------------------------
         # Process and index document
+        #
+        # DocumentService:
+        #
+        #   PDF
+        #     ↓
+        #   text/tables/images
+        #     ↓
+        #   OpenAI image analysis
+        #     ↓
+        #   Supabase image storage
+        #     ↓
+        #   chunks
+        #     ↓
+        #   embeddings
+        #     ↓
+        #   Qdrant
+        #     ↓
+        #   PostgreSQL
         # --------------------------------------------------
 
         result = (
@@ -224,8 +323,28 @@ def upload_document(
 
     except FileNotFoundError as error:
 
-        if file_path.exists():
-            file_path.unlink()
+        try:
+
+            document_service.vector_store.delete_document(
+                document_id
+            )
+
+        except Exception:
+            pass
+
+        try:
+
+            document_store.delete_document(
+                document_id
+            )
+
+        except Exception:
+            pass
+
+        _delete_cloud_document(
+            document_id=document_id,
+            stored_filename=stored_filename,
+        )
 
         raise HTTPException(
             status_code=404,
@@ -234,8 +353,28 @@ def upload_document(
 
     except ValueError as error:
 
-        if file_path.exists():
-            file_path.unlink()
+        try:
+
+            document_service.vector_store.delete_document(
+                document_id
+            )
+
+        except Exception:
+            pass
+
+        try:
+
+            document_store.delete_document(
+                document_id
+            )
+
+        except Exception:
+            pass
+
+        _delete_cloud_document(
+            document_id=document_id,
+            stored_filename=stored_filename,
+        )
 
         raise HTTPException(
             status_code=400,
@@ -244,8 +383,45 @@ def upload_document(
 
     except Exception as error:
 
-        if file_path.exists():
-            file_path.unlink()
+        import traceback
+
+        traceback.print_exc()
+
+        # --------------------------------------------------
+        # Clean vector-store data if indexing succeeded
+        # before a later operation failed.
+        # --------------------------------------------------
+
+        try:
+
+            document_service.vector_store.delete_document(
+                document_id
+            )
+
+        except Exception:
+            pass
+
+        # --------------------------------------------------
+        # Clean database metadata if it was written.
+        # --------------------------------------------------
+
+        try:
+
+            document_store.delete_document(
+                document_id
+            )
+
+        except Exception:
+            pass
+
+        # --------------------------------------------------
+        # Clean cloud files.
+        # --------------------------------------------------
+
+        _delete_cloud_document(
+            document_id=document_id,
+            stored_filename=stored_filename,
+        )
 
         raise HTTPException(
             status_code=500,
@@ -255,6 +431,18 @@ def upload_document(
     finally:
 
         file.file.close()
+
+        # --------------------------------------------------
+        # The PDF is temporary.
+        #
+        # DocumentProcessor's extracted images are also
+        # temporary; DocumentService has already uploaded
+        # them to Supabase Storage.
+        # --------------------------------------------------
+
+        _cleanup_temporary_file(
+            file_path
+        )
 
 
 # ======================================================
@@ -295,21 +483,35 @@ def get_document_history():
 )
 def get_document_file(
     document_id: str,
+    background_tasks: BackgroundTasks,
 ):
     """
     Serve the original uploaded PDF.
 
-    The frontend can use this endpoint to open
-    a source document in a PDF viewer.
+    The PDF is downloaded from private Supabase
+    Storage to a temporary local file.
+
+    FastAPI then serves that file to the frontend.
+
+    The temporary file is deleted automatically
+    after the response has finished.
     """
 
     if not document_id:
+
         raise HTTPException(
             status_code=400,
             detail="Document ID is required.",
         )
 
+    document = None
+    temporary_file_path = None
+
     try:
+
+        # --------------------------------------------------
+        # Load document metadata
+        # --------------------------------------------------
 
         document = (
             document_store.get_document(
@@ -318,6 +520,7 @@ def get_document_file(
         )
 
         if not document:
+
             raise HTTPException(
                 status_code=404,
                 detail="Document not found.",
@@ -328,39 +531,117 @@ def get_document_file(
         )
 
         if not file_name:
+
             raise HTTPException(
                 status_code=404,
                 detail="Document filename not found.",
             )
 
-        file_path = (
-            UPLOAD_DIRECTORY
-            / Path(file_name).name
-        )
+        file_name = Path(
+            file_name
+        ).name
 
-        if not file_path.exists():
-            raise HTTPException(
-                status_code=404,
-                detail="Document file is no longer available.",
-            )
+        # --------------------------------------------------
+        # Validate PDF
+        # --------------------------------------------------
 
-        if file_path.suffix.lower() != ".pdf":
+        if Path(
+            file_name
+        ).suffix.lower() != ".pdf":
+
             raise HTTPException(
                 status_code=400,
                 detail="Stored document is not a PDF.",
             )
 
+        # --------------------------------------------------
+        # Build Supabase Storage path
+        # --------------------------------------------------
+
+        storage_path = (
+            _get_pdf_storage_path(
+                document_id=document_id,
+                stored_filename=file_name,
+            )
+        )
+
+        # --------------------------------------------------
+        # Temporary source directory
+        # --------------------------------------------------
+
+        temporary_directory = (
+            UPLOAD_DIRECTORY
+            / "temp_sources"
+        )
+
+        temporary_directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        temporary_file_path = (
+            temporary_directory
+            / f"{document_id}.pdf"
+        )
+
+        # --------------------------------------------------
+        # Download PDF from Supabase Storage
+        # --------------------------------------------------
+
+        storage.download_file(
+            storage_path=storage_path,
+            local_path=temporary_file_path,
+        )
+
+        # --------------------------------------------------
+        # Delete temporary file after response
+        # --------------------------------------------------
+
+        background_tasks.add_task(
+            _cleanup_temporary_file,
+            temporary_file_path,
+        )
+
+        # --------------------------------------------------
+        # Return PDF.
+        #
+        # The background task runs only after FastAPI
+        # finishes sending the response.
+        # --------------------------------------------------
+
         return FileResponse(
-            path=file_path,
+            path=temporary_file_path,
             media_type="application/pdf",
-            filename=file_path.name,
+            filename=file_name,
             content_disposition_type="inline",
         )
 
     except HTTPException:
+        if temporary_file_path:
+            _cleanup_temporary_file(
+                temporary_file_path
+            )
+
         raise
 
+    except FileNotFoundError as error:
+
+        if temporary_file_path:
+            _cleanup_temporary_file(
+                temporary_file_path
+            )
+
+        raise HTTPException(
+            status_code=404,
+            detail="Document file is no longer available.",
+        ) from error
+
     except Exception as error:
+
+        if temporary_file_path:
+            _cleanup_temporary_file(
+                temporary_file_path
+            )
 
         raise HTTPException(
             status_code=500,
@@ -382,12 +663,14 @@ def delete_document(
     """
     Delete a document from:
 
-        1. ChromaDB
-        2. SQLite
-        3. uploads directory
+        1. Qdrant / ChromaDB
+        2. PostgreSQL / SQLite
+        3. Supabase Storage
+        4. temporary local files
     """
 
     if not document_id:
+
         raise HTTPException(
             status_code=400,
             detail="Document ID is required.",
@@ -408,17 +691,12 @@ def delete_document(
                 detail="Document not found.",
             )
 
-        # --------------------------------------------------
-        # Remember physical filename before deleting
-        # SQLite metadata.
-        # --------------------------------------------------
-
         stored_filename = document.get(
             "file_name"
         )
 
         # --------------------------------------------------
-        # Delete from ChromaDB
+        # Delete from vector database
         # --------------------------------------------------
 
         document_service.vector_store.delete_document(
@@ -426,7 +704,7 @@ def delete_document(
         )
 
         # --------------------------------------------------
-        # Delete from SQLite
+        # Delete from PostgreSQL / SQLite
         # --------------------------------------------------
 
         document_store.delete_document(
@@ -434,20 +712,27 @@ def delete_document(
         )
 
         # --------------------------------------------------
-        # Delete physical PDF
+        # Delete from Supabase Storage
         # --------------------------------------------------
 
-        if stored_filename:
+        _delete_cloud_document(
+            document_id=document_id,
+            stored_filename=stored_filename,
+        )
 
-            file_path = (
-                UPLOAD_DIRECTORY
-                / Path(
-                    stored_filename
-                ).name
-            )
+        # --------------------------------------------------
+        # Delete temporary source file if present
+        # --------------------------------------------------
 
-            if file_path.exists():
-                file_path.unlink()
+        temporary_source = (
+            UPLOAD_DIRECTORY
+            / "temp_sources"
+            / f"{document_id}.pdf"
+        )
+
+        _cleanup_temporary_file(
+            temporary_source
+        )
 
         return {
             "success": True,

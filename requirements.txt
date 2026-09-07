@@ -9,5 +9,8 @@ chromadb==1.5.9
 sentence-transformers==6.0.0
 langchain-text-splitters==1.1.2
 
+qdrant-client==1.19.0
+psycopg[binary]==3.3.5
+
 google-genai==2.20.0
 openai==3.3.1

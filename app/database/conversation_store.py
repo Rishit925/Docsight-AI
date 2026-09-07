@@ -1,15 +1,27 @@
+import os
 import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
+
+import psycopg
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 
 class ConversationStore:
     """
     Persistent storage for document conversations.
 
-    Conversations are stored in the same SQLite database
-    used by DocumentStore.
+    Supports:
+    - SQLite for local development
+    - PostgreSQL (Supabase) for deployment
+
+    Backend selection:
+        DOCSIGHT_DB=sqlite
+        DOCSIGHT_DB=postgres
     """
 
     def __init__(
@@ -18,12 +30,38 @@ class ConversationStore:
     ):
         self.database_path = database_path
 
-        Path(
-            database_path
-        ).parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        self.db_backend = os.getenv(
+            "DOCSIGHT_DB",
+            "sqlite",
+        ).strip().lower()
+
+        if self.db_backend not in {
+            "sqlite",
+            "postgres",
+        }:
+            raise ValueError(
+                "DOCSIGHT_DB must be either "
+                "'sqlite' or 'postgres'."
+            )
+
+        if self.db_backend == "sqlite":
+            Path(
+                database_path
+            ).parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+        else:
+            self.database_url = os.getenv(
+                "DATABASE_URL"
+            )
+
+            if not self.database_url:
+                raise ValueError(
+                    "DATABASE_URL is required when "
+                    "DOCSIGHT_DB=postgres."
+                )
 
         self._create_tables()
 
@@ -32,6 +70,11 @@ class ConversationStore:
     # ==================================================
 
     def _get_connection(self):
+        if self.db_backend == "postgres":
+            return psycopg.connect(
+                self.database_url
+            )
+
         return sqlite3.connect(
             self.database_path
         )
@@ -44,19 +87,35 @@ class ConversationStore:
         connection = self._get_connection()
 
         try:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS conversations (
-                    conversation_id TEXT PRIMARY KEY,
-                    document_id TEXT NOT NULL,
-                    question TEXT NOT NULL,
-                    answer TEXT NOT NULL,
-                    route TEXT,
-                    content_types TEXT,
-                    created_at TEXT NOT NULL
+            if self.db_backend == "postgres":
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.conversations (
+                        conversation_id TEXT PRIMARY KEY,
+                        document_id TEXT NOT NULL,
+                        question TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        route TEXT,
+                        content_types TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
                 )
-                """
-            )
+
+            else:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS conversations (
+                        conversation_id TEXT PRIMARY KEY,
+                        document_id TEXT NOT NULL,
+                        question TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        route TEXT,
+                        content_types TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
 
             connection.commit()
 
@@ -94,29 +153,62 @@ class ConversationStore:
         connection = self._get_connection()
 
         try:
-            connection.execute(
-                """
-                INSERT INTO conversations (
-                    conversation_id,
-                    document_id,
-                    question,
-                    answer,
-                    route,
-                    content_types,
-                    created_at
+            if self.db_backend == "postgres":
+                connection.execute(
+                    """
+                    INSERT INTO public.conversations (
+                        conversation_id,
+                        document_id,
+                        question,
+                        answer,
+                        route,
+                        content_types,
+                        created_at
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        NOW()
+                    )
+                    """,
+                    (
+                        conversation_id,
+                        document_id,
+                        question,
+                        answer,
+                        route,
+                        content_types_text,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    conversation_id,
-                    document_id,
-                    question,
-                    answer,
-                    route,
-                    content_types_text,
-                    datetime.now().isoformat(),
-                ),
-            )
+
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO conversations (
+                        conversation_id,
+                        document_id,
+                        question,
+                        answer,
+                        route,
+                        content_types,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        conversation_id,
+                        document_id,
+                        question,
+                        answer,
+                        route,
+                        content_types_text,
+                        datetime.now().isoformat(),
+                    ),
+                )
 
             connection.commit()
 
@@ -140,24 +232,45 @@ class ConversationStore:
         connection = self._get_connection()
 
         try:
-            cursor = connection.execute(
-                """
-                SELECT
-                    conversation_id,
-                    document_id,
-                    question,
-                    answer,
-                    route,
-                    content_types,
-                    created_at
-                FROM conversations
-                WHERE document_id = ?
-                ORDER BY created_at ASC
-                """,
-                (
-                    document_id,
-                ),
-            )
+            if self.db_backend == "postgres":
+                cursor = connection.execute(
+                    """
+                    SELECT
+                        conversation_id,
+                        document_id,
+                        question,
+                        answer,
+                        route,
+                        content_types,
+                        created_at
+                    FROM public.conversations
+                    WHERE document_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (
+                        document_id,
+                    ),
+                )
+
+            else:
+                cursor = connection.execute(
+                    """
+                    SELECT
+                        conversation_id,
+                        document_id,
+                        question,
+                        answer,
+                        route,
+                        content_types,
+                        created_at
+                    FROM conversations
+                    WHERE document_id = ?
+                    ORDER BY created_at ASC
+                    """,
+                    (
+                        document_id,
+                    ),
+                )
 
             rows = cursor.fetchall()
 
@@ -182,7 +295,14 @@ class ConversationStore:
                         "answer": row[3],
                         "route": row[4],
                         "content_types": content_types,
-                        "created_at": row[6],
+                        "created_at": (
+                            row[6].isoformat()
+                            if hasattr(
+                                row[6],
+                                "isoformat",
+                            )
+                            else row[6]
+                        ),
                     }
                 )
 
@@ -207,15 +327,27 @@ class ConversationStore:
         connection = self._get_connection()
 
         try:
-            connection.execute(
-                """
-                DELETE FROM conversations
-                WHERE document_id = ?
-                """,
-                (
-                    document_id,
-                ),
-            )
+            if self.db_backend == "postgres":
+                connection.execute(
+                    """
+                    DELETE FROM public.conversations
+                    WHERE document_id = %s
+                    """,
+                    (
+                        document_id,
+                    ),
+                )
+
+            else:
+                connection.execute(
+                    """
+                    DELETE FROM conversations
+                    WHERE document_id = ?
+                    """,
+                    (
+                        document_id,
+                    ),
+                )
 
             connection.commit()
 
