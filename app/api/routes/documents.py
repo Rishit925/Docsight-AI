@@ -16,8 +16,8 @@ from app.api.schemas.document import (
     DocumentDeleteResponse,
     DocumentUploadResponse,
 )
-from app.api.services.document_service import (
-    DocumentService,
+from app.api.services.container import (
+    document_service,
 )
 from app.database.document_store import DocumentStore
 from app.storage.supabase_storage import (
@@ -30,8 +30,6 @@ router = APIRouter(
     tags=["Documents"],
 )
 
-
-document_service = DocumentService()
 document_store = DocumentStore()
 storage = SupabaseStorage()
 
