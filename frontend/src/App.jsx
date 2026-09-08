@@ -1447,7 +1447,7 @@ function ConversationCard({
         : "";
 
     const fileUrl =
-      `/api/documents/${documentId}/file${pageSuffix}`;
+      `${import.meta.env.VITE_API_URL || "https://docsight-api-683710113441.europe-west3.run.app/api"}/documents/${encodeURIComponent(documentId)}/file${pageSuffix}`;
 
     window.open(
       fileUrl,
