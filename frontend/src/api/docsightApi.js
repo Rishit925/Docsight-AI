@@ -15,7 +15,9 @@ const api = axios.create({
 // ======================================================
 
 export const checkHealth = async () => {
-  const response = await api.get("/health");
+  const response = await axios.get(
+    `${api.defaults.baseURL.replace(/\/api$/, "")}/health`
+  );
   return response.data;
 };
 
