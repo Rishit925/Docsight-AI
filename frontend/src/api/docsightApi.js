@@ -1,7 +1,9 @@
 import axios from "axios";
 
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "/api",
+  baseURL:
+    import.meta.env.VITE_API_URL ||
+    "https://docsight-api-683710113441.europe-west3.run.app/api",
   headers: {
     "Content-Type": "application/json",
   },
