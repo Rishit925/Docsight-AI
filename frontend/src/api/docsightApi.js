@@ -1,7 +1,7 @@
 import axios from "axios";
 
 const api = axios.create({
-  baseURL: "/api",
+  baseURL: import.meta.env.VITE_API_URL || "/api",
   headers: {
     "Content-Type": "application/json",
   },
@@ -13,7 +13,7 @@ const api = axios.create({
 // ======================================================
 
 export const checkHealth = async () => {
-  const response = await axios.get("/health");
+  const response = await api.get("/health");
   return response.data;
 };
 
@@ -92,7 +92,7 @@ export const getDocumentFileUrl = (
     return null;
   }
 
-  return `/api/documents/${encodeURIComponent(
+  return `${api.defaults.baseURL}/documents/${encodeURIComponent(
     documentId
   )}/file`;
 };
